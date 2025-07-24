@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: temuragi_db
+      POSTGRES_USER: temuragi_user
+      POSTGRES_PASSWORD: local_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temuragi_user -d temuragi_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db-init:
+    build:
+      context: .
+      dockerfile: ./init/Dockerfile.dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TEMURAGI_DB_USER: temuragi_user
+      TEMURAGI_DB_PASSWORD: local_dev_password
+      TEMURAGI_DB_HOST: postgres
+      TEMURAGI_DB_PORT: 5432
+      TEMURAGI_DB_NAME: temuragi_db
+      TEMURAGI_CSRF_KEY: local_dev_csrf_key
+      TEMURAGI_ENCRYPTION_KEY: u1tOOtBW2ECTWXSMS_pZ9wwdn4dEZzg_-ihYJfbYbd8=
+    volumes:
+      - ./init/init.sh:/web/temuragi/init.sh:ro
+      - ./init/data:/web/temuragi/data:ro
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      TEMURAGI_DB_USER: temuragi_user
+      TEMURAGI_DB_PASSWORD: local_dev_password
+      TEMURAGI_DB_HOST: postgres
+      TEMURAGI_DB_PORT: 5432
+      TEMURAGI_DB_NAME: temuragi_db
+      TEMURAGI_CSRF_KEY: local_dev_csrf_key
+      TEMURAGI_ENCRYPTION_KEY: u1tOOtBW2ECTWXSMS_pZ9wwdn4dEZzg_-ihYJfbYbd8=
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/app:/web/temuragi/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./web/ui_src:/app
+      - ./web/static:/usr/share/nginx/html
+      - node_modules:/app/node_modules
+    ports:
+      - "80:80"      # nginx
+      - "3000:3000"  # webpack dev server
+    environment:
+      - REACT_APP_API_BASE_URL=http://localhost:5000/v2/api
+
+volumes:
+  postgres_data:
+  node_modules:
+
+networks:
+  default:
+    name: temuragi_dev_network
