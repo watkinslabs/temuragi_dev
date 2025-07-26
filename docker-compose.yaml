@@ -1,40 +1,67 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: temuragi_db
-      POSTGRES_USER: temuragi_user
-      POSTGRES_PASSWORD: local_dev_password
+      POSTGRES_DB: ${TEMURAGI_DB_NAME}
+      POSTGRES_USER: ${TEMURAGI_DB_USER}
+      POSTGRES_PASSWORD: ${TEMURAGI_DB_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U temuragi_user -d temuragi_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${TEMURAGI_DB_USER} -d ${TEMURAGI_DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  db-init:
+  pgadmin:
+    #image: dpage/pgadmin4
+    #container_name: pgadmin-1
     build:
-      context: .
-      dockerfile: ./init/Dockerfile.dev
+      context: ./pgadmin
+      dockerfile: Dockerfile.dev
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      TEMURAGI_DB_USER: temuragi_user
-      TEMURAGI_DB_PASSWORD: local_dev_password
-      TEMURAGI_DB_HOST: postgres
-      TEMURAGI_DB_PORT: 5432
-      TEMURAGI_DB_NAME: temuragi_db
-      TEMURAGI_CSRF_KEY: local_dev_csrf_key
-      TEMURAGI_ENCRYPTION_KEY: u1tOOtBW2ECTWXSMS_pZ9wwdn4dEZzg_-ihYJfbYbd8=
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_SERVER_JSON_FILE: /data/servers.json
+      PGPASS_FILE: /data/pgpass
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_DISABLE_POSTFIX: "true"
+      # Pass through DB credentials for server config
+      TEMURAGI_DB_HOST: ${TEMURAGI_DB_HOST}
+      TEMURAGI_DB_PORT: ${TEMURAGI_DB_PORT}
+      TEMURAGI_DB_NAME: ${TEMURAGI_DB_NAME}
+      TEMURAGI_DB_USER: ${TEMURAGI_DB_USER}
+      TEMURAGI_DB_PASSWORD: ${TEMURAGI_DB_PASSWORD}
     volumes:
-      - ./init/init.sh:/web/temuragi/init.sh:ro
+      - pgadmin_data:/var/lib/pgadmin
+  
+
+  db-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TEMURAGI_DB_USER: ${TEMURAGI_DB_USER}
+      TEMURAGI_DB_PASSWORD: ${TEMURAGI_DB_PASSWORD}
+      TEMURAGI_DB_HOST: ${TEMURAGI_DB_HOST}
+      TEMURAGI_DB_PORT: ${TEMURAGI_DB_PORT}
+      TEMURAGI_DB_NAME: ${TEMURAGI_DB_NAME}
+      TEMURAGI_CSRF_KEY: ${TEMURAGI_CSRF_KEY}
+      TEMURAGI_ENCRYPTION_KEY: ${TEMURAGI_ENCRYPTION_KEY}
+    volumes:
+      - ./backend/app:/web/temuragi/app
+      - ./init/init.sh:/web/temuragi/init.sh
       - ./init/data:/web/temuragi/data:ro
+    command: ["sh", "-c", "chmod +x /web/temuragi/init.sh && /web/temuragi/init.sh"]
 
   backend:
     build:
@@ -44,15 +71,13 @@ services:
       db-init:
         condition: service_completed_successfully
     environment:
-      TEMURAGI_DB_USER: temuragi_user
-      TEMURAGI_DB_PASSWORD: local_dev_password
-      TEMURAGI_DB_HOST: postgres
-      TEMURAGI_DB_PORT: 5432
-      TEMURAGI_DB_NAME: temuragi_db
-      TEMURAGI_CSRF_KEY: local_dev_csrf_key
-      TEMURAGI_ENCRYPTION_KEY: u1tOOtBW2ECTWXSMS_pZ9wwdn4dEZzg_-ihYJfbYbd8=
-    ports:
-      - "5000:5000"
+      TEMURAGI_DB_USER: ${TEMURAGI_DB_USER}
+      TEMURAGI_DB_PASSWORD: ${TEMURAGI_DB_PASSWORD}
+      TEMURAGI_DB_HOST: ${TEMURAGI_DB_HOST}
+      TEMURAGI_DB_PORT: ${TEMURAGI_DB_PORT}
+      TEMURAGI_DB_NAME: ${TEMURAGI_DB_NAME}
+      TEMURAGI_CSRF_KEY: ${TEMURAGI_CSRF_KEY}
+      TEMURAGI_ENCRYPTION_KEY: ${TEMURAGI_ENCRYPTION_KEY}
     volumes:
       - ./backend/app:/web/temuragi/app
     healthcheck:
@@ -61,6 +86,34 @@ services:
       timeout: 5s
       retries: 5
 
+  # Load balancer / reverse proxy
+  nginx-lb:
+    image: nginx:alpine
+    depends_on:
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-lb.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/ssl:ro
+
+  web-init:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: web_init
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      TEMURAGI_API_BASE: ${TEMURAGI_API_BASE}
+      TEMURAGI_API_PORT: ${TEMURAGI_API_PORT}
+      TEMURAGI_INIT_TOKEN: ${TEMURAGI_INIT_TOKEN}
+
   web:
     build:
       context: ./web
@@ -68,20 +121,31 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      web-init:
+        condition: service_completed_successfully
+
+  # Development webpack server with hot reload
+  web-dev:
+    image: node:20-alpine
+    depends_on:
+      backend:
+        condition: service_healthy
+    working_dir: /app
     volumes:
       - ./web/ui_src:/app
-      - ./web/static:/usr/share/nginx/html
-      - node_modules:/app/node_modules
-    ports:
-      - "80:80"      # nginx
-      - "3000:3000"  # webpack dev server
+      - node_modules_dev:/app/node_modules
     environment:
       - REACT_APP_API_BASE_URL=http://localhost:5000/v2/api
+    command: ["sh", "-c", "npm install && npm start"]
+    profiles:
+      - dev
 
 volumes:
   postgres_data:
+  pgadmin_data:
   node_modules:
+  node_modules_dev:
 
 networks:
   default:
-    name: temuragi_dev_network
+    name: temuragi_dev_network1
